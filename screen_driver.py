@@ -41,7 +41,7 @@ class ScreenDriver:
             time.sleep(0.003)
 
     def init_display(self):
-        """初始化：刷新背景图，隐藏图标"""
+        """初始化：刷新背景图，配置图标"""
         self.cmd("ref exp0")
         self.cmd("vis drone,0")
         self.cmd("vis car,0")
