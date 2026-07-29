@@ -1,6 +1,6 @@
 """
 串口屏驱动 - D题陆空协同
-显示场地+轨迹+无人机/小车实时位置+状态文字
+显示场地+轨迹+标记点+无人机/小车实时位置
 """
 import serial
 import time
@@ -23,8 +23,6 @@ class ScreenDriver:
         self.ser = None
         self.ok = False
         self.encoding = ENCODING
-        self._drone_pos = None
-        self._car_pos = None
 
     def open(self):
         try:
@@ -47,50 +45,69 @@ class ScreenDriver:
             time.sleep(0.003)
 
     def draw_field(self, track_points):
-        """画场地+轨迹，一次性"""
-        from config import FIELD_W, FIELD_H, OFFSET_X, OFFSET_Y, SCALE, H_X, H_Y, A_X, A_Y
+        """一次性绘制场地背景（边框+轨迹+标记）"""
+        import config as cfg
         self.cmd(f"fill 0,0,800,480,{C_BLACK}")
         # 场地边框
-        x1, y1 = OFFSET_X, OFFSET_Y
-        w, h = int(FIELD_W*SCALE), int(FIELD_H*SCALE)
+        x1, y1 = cfg.OFFSET_X, cfg.OFFSET_Y
+        w, h = int(cfg.FIELD_W * cfg.SCALE), int(cfg.FIELD_H * cfg.SCALE)
         self.cmd(f"draw {x1},{y1},{w},{h},{C_WHITE}")
         # 循线轨迹
-        for i in range(len(track_points)-1):
+        for i in range(len(track_points) - 1):
             sx1, sy1 = track_points[i]
-            sx2, sy2 = track_points[i+1]
+            sx2, sy2 = track_points[i + 1]
             self.cmd(f"line {sx1},{sy1},{sx2},{sy2},{C_WHITE}")
-        # H点标记 (无人机)
-        h_sx, h_sy = self._field_to_screen(H_X, H_Y)
-        self.cmd(f"cirs {h_sx},{h_sy},8,{C_RED}")
-        # A点标记 (小车出发点)
-        a_sx, a_sy = self._field_to_screen(A_X, A_Y)
-        self.cmd(f"cirs {a_sx},{a_sy},8,{C_GREEN}")
+        # 标记点: H(红) A(绿) B C D(黄)
+        for name, x, y, color in [
+            ("H", cfg.H_X, cfg.H_Y, C_RED),
+            ("A", cfg.A_X, cfg.A_Y, C_GREEN),
+            ("B", cfg.B_X, cfg.B_Y, C_YELLOW),
+            ("C", cfg.C_X, cfg.C_Y, C_YELLOW),
+            ("D", cfg.D_X, cfg.D_Y, C_YELLOW),
+        ]:
+            sx, sy = self._field_to_screen(x, y)
+            self.cmd(f"cirs {sx},{sy},6,{color}")
+            self.cmd(f'xstr {sx-8},{sy-16},{20},{14},1,{C_WHITE},2,"{name}"')
 
     def _field_to_screen(self, x_cm, y_cm):
-        from config import SCALE, OFFSET_X, OFFSET_Y, FIELD_H
-        sx = OFFSET_X + int(y_cm * SCALE)
-        sy = OFFSET_Y + int((FIELD_H - x_cm) * SCALE)
+        import config as cfg
+        sx = cfg.OFFSET_X + int(y_cm * cfg.SCALE)
+        sy = cfg.OFFSET_Y + int((cfg.FIELD_H - x_cm) * cfg.SCALE)
         return sx, sy
 
     def update_positions(self, drone_xy, car_xy, status_text):
-        """更新无人机和小车位置"""
-        # 清除旧位置(用黑色覆盖)
-        if self._drone_pos:
-            self.cmd(f"cirs {self._drone_pos[0]},{self._drone_pos[1]},8,{C_BLACK}")
-        if self._car_pos:
-            self.cmd(f"cirs {self._car_pos[0]},{self._car_pos[1]},8,{C_BLACK}")
-        # 画新位置
-        if drone_xy:
-            sx, sy = self._field_to_screen(drone_xy[0], drone_xy[1])
-            self.cmd(f"cirs {sx},{sy},8,{C_RED}")
-            self._drone_pos = (sx, sy)
+        """刷新无人机(红)和小车(绿)位置"""
+        import config as cfg
+        # 用fill覆盖旧的场地区域再重画(简单粗暴)
+        x1 = cfg.OFFSET_X
+        y1 = cfg.OFFSET_Y
+        w = int(cfg.FIELD_W * cfg.SCALE)
+        h = int(cfg.FIELD_H * cfg.SCALE)
+        self.cmd(f"fill {x1},{y1},{w},{h},{C_BLACK}")
+        # 重画边框
+        self.cmd(f"draw {x1},{y1},{w},{h},{C_WHITE}")
+        # 重画轨迹
+        import config
+        track = config.get_track_points()
+        for i in range(len(track) - 1):
+            self.cmd(f"line {track[i][0]},{track[i][1]},{track[i+1][0]},{track[i+1][1]},{C_WHITE}")
+        # 重画标记点
+        for name, x, y, color in [
+            ("H", cfg.H_X, cfg.H_Y, C_RED),
+            ("A", cfg.A_X, cfg.A_Y, C_GREEN),
+        ]:
+            sx, sy = self._field_to_screen(x, y)
+            self.cmd(f"cirs {sx},{sy},6,{color}")
+        # 小车绿点
         if car_xy:
             sx, sy = self._field_to_screen(car_xy[0], car_xy[1])
-            self.cmd(f"cirs {sx},{sy},8,{C_GREEN}")
-            self._car_pos = (sx, sy)
-        # 状态文字
+            self.cmd(f"cirs {sx},{sy},7,{C_GREEN}")
+            self.cmd(f'xstr {sx-10},{sy+10},{20},{14},1,{C_GREEN},2,"车"')
+        # 无人机红点
+        if drone_xy:
+            sx, sy = self._field_to_screen(drone_xy[0], drone_xy[1])
+            self.cmd(f"cirs {sx},{sy},7,{C_RED}")
+            self.cmd(f'xstr {sx-10},{sy-20},{20},{14},1,{C_RED},2,"机"')
+        # 右侧状态
+        self.cmd(f'fill 570,40,220,440,{C_BLACK}')
         self.cmd(f'xstr 580,40,200,400,1,{C_WHITE},0,"{status_text}"')
-
-    def show_status_text(self, text):
-        """右侧显示状态文字"""
-        self.cmd(f'xstr 580,40,200,400,1,{C_WHITE},0,"{text}"')
