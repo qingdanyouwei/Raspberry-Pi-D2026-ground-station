@@ -56,4 +56,3 @@ class ScreenDriver:
             self.cmd(f"car.x={sx-10}")
             self.cmd(f"car.y={sy-10}")
         self.cmd(f'xstr 585,20,200,440,1,{C_WHITE},0,"{status_text}"')
-EOF

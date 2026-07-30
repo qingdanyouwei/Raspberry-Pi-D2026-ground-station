@@ -1,24 +1,28 @@
 """
 ANO飞控通讯模块 - D题陆空协同
-接收无人机UWB(0xF9)和小车UWB(0xF8)
+解析0xF2帧(34字节): 无人机UWB+小车UWB+高度+状态
 """
 import struct
 import threading
 import time
 import serial
-from config import *
 
 FRAME_HEAD = 0xAA
 ANO_PORT = "/dev/ttyACM0"
 ANO_BAUD = 500000
 
+MISSION_NAMES = {
+    0: "空闲", 1: "起飞", 2: "巡航", 3: "悬停",
+    4: "返航", 5: "降落", 6: "完成",
+    7: "悬停3秒", 8: "伴飞", 9: "投掷逼近", 10: "投掷",
+}
 
-def calc_checksum(frame_without_checksum: bytes):
-    sumcheck = addcheck = 0
-    for b in frame_without_checksum:
-        sumcheck = (sumcheck + b) & 0xFF
-        addcheck = (addcheck + sumcheck) & 0xFF
-    return sumcheck, addcheck
+def calc_checksum(frame):
+    s = a = 0
+    for b in frame:
+        s = (s + b) & 0xFF
+        a = (a + s) & 0xFF
+    return s, a
 
 
 class AnoController:
@@ -27,11 +31,12 @@ class AnoController:
         self.ok = False
         self.running = False
         self.rx_buf = bytearray()
-        self.data_lock = threading.Lock()
-        self.drone_pos = None  # (x_cm, y_cm, alt_cm)
-        self.car_pos = None    # (x_cm, y_cm)
-        self.fc_log = []
-        self.position_callback = None
+        self.lock = threading.Lock()
+        self.data = {"drone_x": 0, "drone_y": 0, "drone_h": 0,
+                     "laser_h": 0, "car_x": 0, "car_y": 0,
+                     "mode": 0, "state": 0, "car_online": 0,
+                     "flying": 0, "running": 0, "section": 0}
+        self.callback = None
 
     def open(self):
         try:
@@ -51,20 +56,19 @@ class AnoController:
         if self.ser and self.ser.is_open:
             self.ser.close()
 
-    def set_position_callback(self, cb):
-        """回调: cb(drone_x, drone_y, drone_h, car_x, car_y)"""
-        self.position_callback = cb
+    def set_callback(self, cb):
+        self.callback = cb
 
     def _rx_loop(self):
         while self.running:
             try:
-                data = self.ser.read(512)
-                if data:
-                    self._parse_rx(data)
+                d = self.ser.read(512)
+                if d:
+                    self._parse(d)
             except:
                 time.sleep(0.01)
 
-    def _parse_rx(self, data):
+    def _parse(self, data):
         self.rx_buf.extend(data)
         while True:
             while self.rx_buf and self.rx_buf[0] != FRAME_HEAD:
@@ -86,38 +90,35 @@ class AnoController:
             msg_id = frame[2]
             payload = frame[4:4+dlen]
             if msg_id == 0xA0 and len(payload) >= 2:
-                text = payload[1:].decode("ascii", errors="ignore").strip("\x00\r\n ")
-                if text:
-                    self.fc_log.append(text)
-                    print(f"[ANO飞控] <- {text}")
-            elif msg_id == 0xF9 and len(payload) >= 27:
-                self._update_drone(payload)
-            elif msg_id == 0xF8 and len(payload) >= 8:
-                cx, cy = struct.unpack_from("<ii", payload, 0)
-                cx, cy = -cx, -cy  # 临时：坐标可能需要取反
-                with self.data_lock:
-                    self.car_pos = (cx, cy)
-                self._notify()
+                t = payload[1:].decode("ascii", "ignore").strip("\x00\r\n ")
+                if t:
+                    print(f"[ANO飞控] <- {t}")
+            elif msg_id == 0xF2 and dlen >= 30:
+                self._update_f2(payload)
 
-    def _update_drone(self, payload):
-        plen = len(payload)
-        if plen >= 40 and payload[0] == 5:
-            (ver, found, online, ex, ey, off, cid, cnt, evt,
-             h, x, y, *_) = struct.unpack_from("<3B2hH2BI3i6BIBH", payload, 0)
-        elif plen >= 27:
-            (ver, found, online, ex, ey, off, cid, cnt, evt,
-             h, x, y) = struct.unpack_from("<3B2hH2BI3i", payload, 0)
-        else:
+    def _update_f2(self, p):
+        if p[0] != 2:
             return
-        with self.data_lock:
-            self.drone_pos = (x, y, h)
-        self._notify()
-
-    def _notify(self):
-        if self.position_callback:
-            with self.data_lock:
-                d = self.drone_pos
-                c = self.car_pos
-            dx, dy, dh = d if d else (0, 0, 0)
-            cx, cy = c if c else (0, 0)
-            self.position_callback(dx, dy, dh, cx, cy)
+        ver, mode, state, flags = struct.unpack_from("<4B", p, 0)
+        drone_x = struct.unpack_from("<i", p, 4)[0]
+        drone_y = struct.unpack_from("<i", p, 8)[0]
+        fusion_h = struct.unpack_from("<i", p, 12)[0]
+        laser_h = struct.unpack_from("<i", p, 16)[0]
+        car_x = struct.unpack_from("<i", p, 20)[0]
+        car_y = struct.unpack_from("<i", p, 24)[0]
+        section = p[28]
+        running = (flags >> 0) & 1
+        car_on = (flags >> 2) & 1
+        flying = (flags >> 3) & 1
+        with self.lock:
+            self.data = {
+                "drone_x": drone_x, "drone_y": drone_y,
+                "drone_h": fusion_h, "laser_h": laser_h,
+                "car_x": car_x, "car_y": car_y,
+                "mode": mode, "state": state,
+                "car_online": car_on, "flying": flying,
+                "running": running, "section": section,
+                "state_name": MISSION_NAMES.get(state, str(state)),
+            }
+        if self.callback:
+            self.callback(dict(self.data))
